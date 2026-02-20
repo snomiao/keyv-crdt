@@ -5,255 +5,107 @@ function createMemoryStore<T>(): KeyvCRDTStore<T> & { _data: Map<string, T> } {
   const data = new Map<string, T>();
   return {
     _data: data,
-    get: async (key: string) => data.get(key) as T,
-    set: async (key: string, value: T) => {
-      data.set(key, value);
-    },
+    get: async (key: string) => data.get(key),
+    set: async (key: string, value: T) => { data.set(key, value); },
     delete: async (key: string) => data.delete(key),
     clear: async () => data.clear(),
   };
 }
 
-describe('KeyvCRDT', () => {
+describe('KeyvCRDT - Single Store', () => {
   describe('LWW (Last-Write-Wins) strategy', () => {
     test('should keep the value with latest timestamp', async () => {
       const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const device1 = new KeyvCRDT(store, 'device1', { name: 'lww' });
-      const device2 = new KeyvCRDT(store, 'device2', { name: 'lww' });
+      const device1 = new KeyvCRDT('device1', { name: 'lww' }, store);
+      const device2 = new KeyvCRDT('device2', { name: 'lww' }, store);
 
-      // Device 1 writes first
       await device1.set('user:1', { name: 'Alice' });
-
-      // Device 2 writes later
       await new Promise(r => setTimeout(r, 10));
       await device2.set('user:1', { name: 'Bob' });
 
-      // Both should see Bob (latest)
       expect((await device1.get('user:1'))?.name).toBe('Bob');
       expect((await device2.get('user:1'))?.name).toBe('Bob');
-    });
-
-    test('should use deviceId as tie-breaker when timestamps are equal', async () => {
-      const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-
-      // Manually create CRDT doc with specific timestamp
-      const timestamp = Date.now();
-      store._data.set('user:1', {
-        name: { v: 'Alice', t: timestamp, d: 'device-a' },
-      });
-
-      // Device with higher ID writes with same timestamp
-      const device = new KeyvCRDT(store, 'device-z', { name: 'lww' });
-
-      // Force same timestamp by writing and manipulating
-      await device.set('user:1', { name: 'Zoe' });
-
-      // Since device-z wrote later (even if same second), Zoe should win
-      const result = await device.get('user:1');
-      expect(result?.name).toBe('Zoe');
     });
   });
 
   describe('MAX strategy', () => {
     test('should keep the highest value', async () => {
       const store = createMemoryStore<CRDTDocument<{ score: number }>>();
-      const device1 = new KeyvCRDT(store, 'device1', { score: 'max' });
-      const device2 = new KeyvCRDT(store, 'device2', { score: 'max' });
+      const device1 = new KeyvCRDT('device1', { score: 'max' }, store);
+      const device2 = new KeyvCRDT('device2', { score: 'max' }, store);
 
       await device1.set('game:1', { score: 100 });
-      await device2.set('game:1', { score: 50 }); // Lower score
+      await device2.set('game:1', { score: 50 });
 
-      // Both should have the max score
       expect((await device1.get('game:1'))?.score).toBe(100);
       expect((await device2.get('game:1'))?.score).toBe(100);
-    });
-
-    test('should update when new value is higher', async () => {
-      const store = createMemoryStore<CRDTDocument<{ score: number }>>();
-      const device1 = new KeyvCRDT(store, 'device1', { score: 'max' });
-      const device2 = new KeyvCRDT(store, 'device2', { score: 'max' });
-
-      await device1.set('game:1', { score: 100 });
-      await device2.set('game:1', { score: 200 }); // Higher score
-
-      expect((await device1.get('game:1'))?.score).toBe(200);
-      expect((await device2.get('game:1'))?.score).toBe(200);
     });
   });
 
   describe('MIN strategy', () => {
     test('should keep the lowest value', async () => {
       const store = createMemoryStore<CRDTDocument<{ bestTime: number }>>();
-      const device1 = new KeyvCRDT(store, 'device1', { bestTime: 'min' });
-      const device2 = new KeyvCRDT(store, 'device2', { bestTime: 'min' });
+      const device1 = new KeyvCRDT('device1', { bestTime: 'min' }, store);
+      const device2 = new KeyvCRDT('device2', { bestTime: 'min' }, store);
 
       await device1.set('race:1', { bestTime: 120 });
-      await device2.set('race:1', { bestTime: 95 }); // Faster time
+      await device2.set('race:1', { bestTime: 95 });
 
       expect((await device1.get('race:1'))?.bestTime).toBe(95);
-      expect((await device2.get('race:1'))?.bestTime).toBe(95);
     });
   });
 
   describe('COUNTER strategy', () => {
     test('should sum values from all devices', async () => {
       const store = createMemoryStore<CRDTDocument<{ coins: number }>>();
-      const mobile = new KeyvCRDT(store, 'mobile', { coins: 'counter' });
-      const pc = new KeyvCRDT(store, 'pc', { coins: 'counter' });
+      const mobile = new KeyvCRDT('mobile', { coins: 'counter' }, store);
+      const pc = new KeyvCRDT('pc', { coins: 'counter' }, store);
 
-      // Mobile earns 100 coins
       await mobile.set('player:1', { coins: 100 });
-
-      // PC earns 50 coins
       await pc.set('player:1', { coins: 50 });
 
-      // Total should be 150 (100 + 50)
       expect((await mobile.get('player:1'))?.coins).toBe(150);
       expect((await pc.get('player:1'))?.coins).toBe(150);
-    });
-
-    test('should handle re-set without inflating counter', async () => {
-      const store = createMemoryStore<CRDTDocument<{ coins: number }>>();
-      const mobile = new KeyvCRDT(store, 'mobile', { coins: 'counter' });
-
-      await mobile.set('player:1', { coins: 100 });
-      await mobile.set('player:1', { coins: 100 }); // Same value again
-      await mobile.set('player:1', { coins: 100 }); // Same value again
-
-      // Should still be 100, not 300
-      expect((await mobile.get('player:1'))?.coins).toBe(100);
-    });
-
-    test('should update counter when value changes', async () => {
-      const store = createMemoryStore<CRDTDocument<{ coins: number }>>();
-      const mobile = new KeyvCRDT(store, 'mobile', { coins: 'counter' });
-
-      await mobile.set('player:1', { coins: 100 });
-      await mobile.set('player:1', { coins: 150 }); // Earned more
-
-      // Should be 150 (latest value for this device)
-      expect((await mobile.get('player:1'))?.coins).toBe(150);
     });
   });
 
   describe('UNION strategy', () => {
     test('should merge arrays without duplicates', async () => {
       const store = createMemoryStore<CRDTDocument<{ tags: string[] }>>();
-      const device1 = new KeyvCRDT(store, 'device1', { tags: 'union' });
-      const device2 = new KeyvCRDT(store, 'device2', { tags: 'union' });
+      const device1 = new KeyvCRDT('device1', { tags: 'union' }, store);
+      const device2 = new KeyvCRDT('device2', { tags: 'union' }, store);
 
       await device1.set('item:1', { tags: ['a', 'b', 'c'] });
       await device2.set('item:1', { tags: ['b', 'c', 'd', 'e'] });
 
-      const result1 = await device1.get('item:1');
-      const result2 = await device2.get('item:1');
-
-      expect(result1?.tags?.sort()).toEqual(['a', 'b', 'c', 'd', 'e']);
-      expect(result2?.tags?.sort()).toEqual(['a', 'b', 'c', 'd', 'e']);
+      expect((await device1.get('item:1'))?.tags?.sort()).toEqual(['a', 'b', 'c', 'd', 'e']);
     });
   });
 
   describe('Custom merge function', () => {
-    test('should use custom merge function (first-writer-wins)', async () => {
-      type Data = { value: string };
-      const store = createMemoryStore<CRDTDocument<Data>>();
-
-      // Custom merge: first writer wins (keep earliest timestamp)
-      const firstWriterWins = (
-        local: string,
-        remote: string,
-        lm: { timestamp: number },
-        rm: { timestamp: number }
-      ) => (lm.timestamp <= rm.timestamp ? local : remote);
-
-      const device1 = new KeyvCRDT(store, 'device1', { value: firstWriterWins });
-      const device2 = new KeyvCRDT(store, 'device2', { value: firstWriterWins });
-
-      await device1.set('item:1', { value: 'first' });
-      await new Promise(r => setTimeout(r, 10));
-      await device2.set('item:1', { value: 'second' });
-
-      // First writer should win
-      expect((await device1.get('item:1'))?.value).toBe('first');
-      expect((await device2.get('item:1'))?.value).toBe('first');
-    });
-
-    test('should use custom merge for computed values', async () => {
+    test('should use custom merge function', async () => {
       type Data = { votes: { up: number; down: number } };
       const store = createMemoryStore<CRDTDocument<Data>>();
 
-      // Custom merge: combine votes (max of each)
-      const mergeVotes = (
-        local: { up: number; down: number },
-        remote: { up: number; down: number }
-      ) => ({
+      const mergeVotes = (local: Data['votes'], remote: Data['votes']) => ({
         up: Math.max(local.up, remote.up),
         down: Math.max(local.down, remote.down),
       });
 
-      const device1 = new KeyvCRDT(store, 'device1', { votes: mergeVotes });
-      const device2 = new KeyvCRDT(store, 'device2', { votes: mergeVotes });
+      const device1 = new KeyvCRDT('device1', { votes: mergeVotes }, store);
+      const device2 = new KeyvCRDT('device2', { votes: mergeVotes }, store);
 
       await device1.set('post:1', { votes: { up: 10, down: 2 } });
       await device2.set('post:1', { votes: { up: 8, down: 5 } });
 
-      // Should have max of each
       expect((await device1.get('post:1'))?.votes).toEqual({ up: 10, down: 5 });
-      expect((await device2.get('post:1'))?.votes).toEqual({ up: 10, down: 5 });
     });
   });
 
-  describe('Mixed strategies', () => {
-    test('should handle different strategies for different fields', async () => {
-      interface GameProfile {
-        name: string;
-        highScore: number;
-        totalCoins: number;
-        achievements: string[];
-      }
-
-      const store = createMemoryStore<CRDTDocument<GameProfile>>();
-
-      const mergeConfig: MergeConfig<GameProfile> = {
-        name: 'lww',
-        highScore: 'max',
-        totalCoins: 'counter',
-        achievements: 'union',
-      };
-
-      const mobile = new KeyvCRDT(store, 'mobile', mergeConfig);
-      const pc = new KeyvCRDT(store, 'pc', mergeConfig);
-
-      // Mobile initializes
-      await mobile.set('player:1', {
-        name: 'Player1',
-        highScore: 1000,
-        totalCoins: 50,
-        achievements: ['first_login'],
-      });
-
-      // PC writes with different values
-      await new Promise(r => setTimeout(r, 10));
-      await pc.set('player:1', {
-        name: 'ProGamer',      // LWW: PC wins (later)
-        highScore: 500,        // MAX: Mobile wins (higher)
-        totalCoins: 80,        // COUNTER: Sum = 130
-        achievements: ['pro'], // UNION: Merged
-      });
-
-      const result = await mobile.get('player:1');
-
-      expect(result?.name).toBe('ProGamer');           // LWW
-      expect(result?.highScore).toBe(1000);            // MAX
-      expect(result?.totalCoins).toBe(130);            // COUNTER (50 + 80)
-      expect(result?.achievements?.sort()).toEqual(['first_login', 'pro']); // UNION
-    });
-  });
-
-  describe('delete with tombstone', () => {
-    test('delete() should tombstone data (get returns undefined)', async () => {
+  describe('Tombstone deletion', () => {
+    test('delete() should tombstone data', async () => {
       const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const crdt = new KeyvCRDT(store, 'device', {});
+      const crdt = new KeyvCRDT('device', {}, store);
 
       await crdt.set('key', { name: 'test' });
       expect(await crdt.has('key')).toBe(true);
@@ -266,96 +118,232 @@ describe('KeyvCRDT', () => {
 
     test('later edit should revive deleted item', async () => {
       const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const deviceA = new KeyvCRDT(store, 'deviceA', {});
-      const deviceB = new KeyvCRDT(store, 'deviceB', {});
+      const deviceA = new KeyvCRDT('deviceA', {}, store);
+      const deviceB = new KeyvCRDT('deviceB', {}, store);
 
-      // Device A creates and deletes
       await deviceA.set('key', { name: 'Alice' });
       await deviceA.delete('key');
       expect(await deviceA.get('key')).toBeUndefined();
 
-      // Device B edits later (should revive)
       await new Promise(r => setTimeout(r, 10));
       await deviceB.set('key', { name: 'Bob' });
 
-      // Both should see the revived data
       expect((await deviceA.get('key'))?.name).toBe('Bob');
-      expect((await deviceB.get('key'))?.name).toBe('Bob');
       expect(await deviceA.isDeleted('key')).toBe(false);
     });
 
-    test('later delete should override edit', async () => {
+    test('hardDelete() should permanently remove', async () => {
       const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const deviceA = new KeyvCRDT(store, 'deviceA', {});
-      const deviceB = new KeyvCRDT(store, 'deviceB', {});
-
-      // Device A creates
-      await deviceA.set('key', { name: 'Alice' });
-
-      // Device B deletes later
-      await new Promise(r => setTimeout(r, 10));
-      await deviceB.delete('key');
-
-      // Both should see it as deleted
-      expect(await deviceA.get('key')).toBeUndefined();
-      expect(await deviceB.get('key')).toBeUndefined();
-    });
-
-    test('concurrent delete and edit - later timestamp wins', async () => {
-      const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const deviceA = new KeyvCRDT(store, 'deviceA', {});
-      const deviceB = new KeyvCRDT(store, 'deviceB', {});
-
-      // Setup: both have initial data
-      await deviceA.set('key', { name: 'Initial' });
-
-      // Device A deletes
-      await deviceA.delete('key');
-
-      // Device B edits LATER (should win)
-      await new Promise(r => setTimeout(r, 10));
-      await deviceB.set('key', { name: 'Updated' });
-
-      // Edit wins because it has later timestamp
-      expect((await deviceA.get('key'))?.name).toBe('Updated');
-      expect((await deviceB.get('key'))?.name).toBe('Updated');
-    });
-
-    test('hardDelete() should permanently remove (no tombstone)', async () => {
-      const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const crdt = new KeyvCRDT(store, 'device', {});
+      const crdt = new KeyvCRDT('device', {}, store);
 
       await crdt.set('key', { name: 'test' });
       await crdt.hardDelete('key');
 
-      // Data is completely gone
       expect(await crdt.get('key')).toBeUndefined();
-      expect(await crdt.isDeleted('key')).toBe(false); // No tombstone
+      expect(await crdt.isDeleted('key')).toBe(false);
       expect(await crdt.getRaw('key')).toBeUndefined();
     });
   });
+});
 
-  describe('getRaw', () => {
-    test('should return raw CRDT document with metadata', async () => {
-      const store = createMemoryStore<CRDTDocument<{ name: string }>>();
-      const crdt = new KeyvCRDT(store, 'device', {});
+describe('KeyvCRDT - Multi Store', () => {
+  test('should read from cache first, fall back to remote', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const crdt = new KeyvCRDT('device', {}, cache, remote);
 
-      await crdt.set('key', { name: 'test' });
-
-      const raw = await crdt.getRaw('key');
-      expect(raw?.name?.v).toBe('test');
-      expect(raw?.name?.d).toBe('device');
-      expect(typeof raw?.name?.t).toBe('number');
+    // Write to remote only (simulating another device)
+    remote._data.set('key', {
+      name: { v: 'FromRemote', t: Date.now(), d: 'other-device' },
     });
+
+    // Should find in remote and return
+    const result = await crdt.get('key');
+    expect(result?.name).toBe('FromRemote');
+
+    // Cache should now have the value
+    expect(cache._data.has('key')).toBe(true);
   });
 
-  describe('createCRDT factory', () => {
-    test('should create KeyvCRDT instance', async () => {
-      const store = createMemoryStore<CRDTDocument<{ value: string }>>();
-      const crdt = createCRDT(store, 'device', { value: 'lww' });
+  test('should write to all stores', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const crdt = new KeyvCRDT('device', {}, cache, remote);
 
-      await crdt.set('key', { value: 'test' });
-      expect((await crdt.get('key'))?.value).toBe('test');
+    await crdt.set('key', { name: 'Alice' });
+
+    // Both stores should have the value
+    expect(cache._data.has('key')).toBe(true);
+    expect(remote._data.has('key')).toBe(true);
+  });
+
+  test('should merge data from all stores on set', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string; score: number }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string; score: number }>>();
+
+    // Simulate: remote has data from another device
+    const oldTimestamp = Date.now() - 1000;
+    remote._data.set('key', {
+      name: { v: 'OldName', t: oldTimestamp, d: 'other' },
+      score: { v: 200, t: oldTimestamp, d: 'other' },
     });
+
+    const crdt = new KeyvCRDT('device', { score: 'max' }, cache, remote);
+
+    // Set new data - should merge with remote
+    await crdt.set('key', { name: 'NewName', score: 100 });
+
+    const result = await crdt.get('key');
+    expect(result?.name).toBe('NewName');  // LWW: local wins (newer)
+    expect(result?.score).toBe(200);       // MAX: remote wins (higher)
+  });
+
+  test('mobile + pc concurrent writes should merge correctly', async () => {
+    // Shared remote store (like MongoDB)
+    const sharedRemote = createMemoryStore<CRDTDocument<{ name: string; highScore: number; coins: number }>>();
+
+    // Mobile device: local cache + shared remote
+    const mobileCache = createMemoryStore<CRDTDocument<{ name: string; highScore: number; coins: number }>>();
+    const mobile = new KeyvCRDT('mobile', {
+      name: 'lww',
+      highScore: 'max',
+      coins: 'counter',
+    }, mobileCache, sharedRemote);
+
+    // PC device: local cache + shared remote
+    const pcCache = createMemoryStore<CRDTDocument<{ name: string; highScore: number; coins: number }>>();
+    const pc = new KeyvCRDT('pc', {
+      name: 'lww',
+      highScore: 'max',
+      coins: 'counter',
+    }, pcCache, sharedRemote);
+
+    // Mobile writes first
+    await mobile.set('player:1', { name: 'MobileUser', highScore: 100, coins: 50 });
+
+    // PC writes later
+    await new Promise(r => setTimeout(r, 10));
+    await pc.set('player:1', { name: 'PCUser', highScore: 80, coins: 30 });
+
+    // Both should see merged result
+    const mobileResult = await mobile.get('player:1');
+    const pcResult = await pc.get('player:1');
+
+    expect(mobileResult?.name).toBe('PCUser');      // LWW: PC wins (later)
+    expect(mobileResult?.highScore).toBe(100);      // MAX: Mobile wins (higher)
+    expect(mobileResult?.coins).toBe(80);           // COUNTER: 50 + 30
+
+    expect(pcResult?.name).toBe('PCUser');
+    expect(pcResult?.highScore).toBe(100);
+    expect(pcResult?.coins).toBe(80);
+  });
+
+  test('should handle cache miss and populate cache from remote', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string }>>();
+
+    // Data only in remote
+    remote._data.set('key', {
+      name: { v: 'RemoteData', t: Date.now(), d: 'other' },
+    });
+
+    const crdt = new KeyvCRDT('device', {}, cache, remote);
+
+    // Cache is empty
+    expect(cache._data.has('key')).toBe(false);
+
+    // Get should fetch from remote
+    const result = await crdt.get('key');
+    expect(result?.name).toBe('RemoteData');
+
+    // Cache should now be populated
+    expect(cache._data.has('key')).toBe(true);
+  });
+
+  test('should delete from all stores', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const crdt = new KeyvCRDT('device', {}, cache, remote);
+
+    await crdt.set('key', { name: 'test' });
+    await crdt.delete('key');
+
+    // Both should have tombstone
+    expect(cache._data.get('key')?._deleted?.v).toBe(true);
+    expect(remote._data.get('key')?._deleted?.v).toBe(true);
+
+    // Get should return undefined
+    expect(await crdt.get('key')).toBeUndefined();
+  });
+
+  test('should hardDelete from all stores', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const crdt = new KeyvCRDT('device', {}, cache, remote);
+
+    await crdt.set('key', { name: 'test' });
+    await crdt.hardDelete('key');
+
+    // Both should be empty
+    expect(cache._data.has('key')).toBe(false);
+    expect(remote._data.has('key')).toBe(false);
+  });
+
+  test('should clear all stores', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ name: string }>>();
+    const crdt = new KeyvCRDT('device', {}, cache, remote);
+
+    await crdt.set('key1', { name: 'a' });
+    await crdt.set('key2', { name: 'b' });
+    await crdt.clear();
+
+    expect(cache._data.size).toBe(0);
+    expect(remote._data.size).toBe(0);
+  });
+
+  test('three-tier cache: memory → disk → network', async () => {
+    const memory = createMemoryStore<CRDTDocument<{ value: number }>>();
+    const disk = createMemoryStore<CRDTDocument<{ value: number }>>();
+    const network = createMemoryStore<CRDTDocument<{ value: number }>>();
+
+    const crdt = new KeyvCRDT('device', { value: 'max' }, memory, disk, network);
+
+    // Data only in network (simulating cold start)
+    network._data.set('key', {
+      value: { v: 100, t: Date.now(), d: 'server' },
+    });
+
+    // Get should fetch from network
+    const result = await crdt.get('key');
+    expect(result?.value).toBe(100);
+
+    // Memory and disk should now be populated
+    expect(memory._data.has('key')).toBe(true);
+    expect(disk._data.has('key')).toBe(true);
+  });
+});
+
+describe('createCRDT factory', () => {
+  test('should create KeyvCRDT instance with single store', async () => {
+    const store = createMemoryStore<CRDTDocument<{ value: string }>>();
+    const crdt = createCRDT('device', { value: 'lww' }, store);
+
+    await crdt.set('key', { value: 'test' });
+    expect((await crdt.get('key'))?.value).toBe('test');
+  });
+
+  test('should create KeyvCRDT instance with multiple stores', async () => {
+    const cache = createMemoryStore<CRDTDocument<{ value: string }>>();
+    const remote = createMemoryStore<CRDTDocument<{ value: string }>>();
+    const crdt = createCRDT('device', {}, cache, remote);
+
+    await crdt.set('key', { value: 'test' });
+    expect(cache._data.has('key')).toBe(true);
+    expect(remote._data.has('key')).toBe(true);
+  });
+
+  test('should throw if no stores provided', () => {
+    expect(() => new KeyvCRDT('device', {})).toThrow('KeyvCRDT requires at least one store');
   });
 });

@@ -1,44 +1,35 @@
 /**
- * KeyvCRDT - CRDT wrapper for Keyv-compatible stores
+ * KeyvCRDT - Multi-store CRDT wrapper for Keyv-compatible stores
  *
- * Provides conflict-free replication with customizable merge strategies.
- * Simple API: just use .get() and .set() like regular Keyv.
- *
- * Features:
- * - Tombstone-based deletion (delete vs edit conflicts resolved by timestamp)
- * - Per-field merge strategies
- * - Custom merge functions
+ * Like KeyvNest, but with CRDT conflict resolution. Supports multiple stores
+ * (cache → remote) with automatic merging across devices.
  *
  * @example
  * ```ts
  * import { KeyvCRDT } from 'keyv-crdt';
  *
- * const store = new Map(); // or any Keyv-compatible store
- * const crdt = new KeyvCRDT(store, 'device-123', {
- *   name: 'lww',           // Last-Write-Wins
- *   highScore: 'max',      // Keep highest
- *   totalCoins: 'counter', // Sum per-device
- *   achievements: 'union', // Merge arrays
- * });
+ * // Multi-store: local cache + shared remote
+ * const crdt = KeyvCRDT('device-123', {
+ *   name: 'lww',
+ *   highScore: 'max',
+ *   coins: 'counter',
+ * }, new Map(), mongoStore);
  *
- * // Simple API - just like Keyv
- * await crdt.set('user:123', { name: 'Alice', totalCoins: 100 });
- * const data = await crdt.get('user:123');
- *
- * // Delete with tombstone (can be overridden by later edits)
- * await crdt.delete('user:123');
+ * // Simple API
+ * await crdt.set('user:1', { name: 'Alice', highScore: 100 });
+ * const data = await crdt.get('user:1');
  * ```
  */
 
 // ============================================================================
-// Store Interface (compatible with Keyv, Map, and custom stores)
+// Store Interface
 // ============================================================================
 
 type Awaitable<T> = Promise<T> | T;
 
 /**
  * Minimal store interface compatible with Keyv stores.
- * Also works with Map and any object implementing get/set/delete.
+ * Works with Map, Keyv, Redis, MongoDB, etc.
  */
 export interface KeyvCRDTStore<T = unknown> {
   get(key: string): Awaitable<T | undefined>;
@@ -102,49 +93,74 @@ export type MergeConfig<T extends object> = {
 // ============================================================================
 
 /**
- * CRDT wrapper for Keyv-compatible stores.
+ * Multi-store CRDT wrapper.
  *
- * Enables conflict-free synchronization between multiple devices/clients
- * with customizable merge strategies per field.
+ * Stores are ordered from fastest (cache) to slowest (source of truth).
+ * - On get: checks stores in order, merges all found, updates caches
+ * - On set: reads from deepest store first, merges, writes to all stores
  */
 export class KeyvCRDT<T extends object> {
+  private stores: KeyvCRDTStore<CRDTDocument<T>>[];
+
   /**
    * Create a new KeyvCRDT instance.
    *
-   * @param store - Any Keyv-compatible store (Map, Keyv, Redis, etc.)
    * @param deviceId - Unique identifier for this device/client
    * @param mergeConfig - Merge strategy configuration per field
+   * @param stores - One or more stores (cache first, source of truth last)
    */
   constructor(
-    private store: KeyvCRDTStore<CRDTDocument<T>>,
     private deviceId: string,
-    private mergeConfig: MergeConfig<T> = {}
-  ) {}
+    private mergeConfig: MergeConfig<T> = {},
+    ...stores: KeyvCRDTStore<CRDTDocument<T>>[]
+  ) {
+    if (stores.length === 0) {
+      throw new Error('KeyvCRDT requires at least one store');
+    }
+    this.stores = stores;
+  }
 
   /**
-   * Get data from store (merged, as plain object).
-   * Returns undefined if key doesn't exist or is deleted (tombstoned).
+   * Get data from stores (merged, as plain object).
+   * Checks caches first, falls back to deeper stores, merges all versions.
    *
    * @param key - The key to fetch
    * @returns Plain object (without CRDT metadata), or undefined if not found/deleted
    */
   async get(key: string): Promise<Partial<T> | undefined> {
-    const doc = await this.store.get(key);
-    if (!doc) return undefined;
+    let merged: CRDTDocument<T> | undefined;
+    let cacheHitIndex = -1;
 
-    const crdtDoc = doc as unknown as CRDTDocument<T>;
+    // Read from all stores and merge
+    for (let i = 0; i < this.stores.length; i++) {
+      const doc = await this.stores[i].get(key);
+      if (doc) {
+        if (cacheHitIndex === -1) cacheHitIndex = i;
+        merged = merged ? this.mergeDocuments(merged, doc) : doc;
+      }
+    }
 
-    // Check tombstone - if deleted, return undefined
-    if (crdtDoc[TOMBSTONE_KEY]?.v === true) {
+    if (!merged) return undefined;
+
+    // Update caches with merged result (stores before the first hit)
+    if (cacheHitIndex > 0) {
+      const writePromises = this.stores
+        .slice(0, cacheHitIndex)
+        .map(store => store.set(key, merged));
+      await Promise.all(writePromises);
+    }
+
+    // Check tombstone
+    if (merged[TOMBSTONE_KEY]?.v === true) {
       return undefined;
     }
 
-    return this.toPlainObject(crdtDoc);
+    return this.toPlainObject(merged);
   }
 
   /**
-   * Set/update data in store (merges with existing data).
-   * Also clears tombstone if item was previously deleted.
+   * Set/update data in all stores (merges with existing data).
+   * Reads from deepest store first to get latest from other devices.
    *
    * @param key - The key to store under
    * @param updates - Partial object with fields to update
@@ -180,24 +196,37 @@ export class KeyvCRDT<T extends object> {
       }
     }
 
-    // Merge with existing
-    const existing = await this.store.get(key);
-    const merged = existing
-      ? this.mergeDocuments(newFields, existing as unknown as CRDTDocument<T>)
-      : newFields;
+    // Read from ALL stores and merge (to get latest from other devices)
+    let merged = newFields;
+    for (const store of this.stores) {
+      const existing = await store.get(key);
+      if (existing) {
+        merged = this.mergeDocuments(merged, existing);
+      }
+    }
 
-    await this.store.set(key, merged as unknown as CRDTDocument<T>);
+    // Write merged result to ALL stores
+    const writePromises = this.stores.map(store => store.set(key, merged));
+    await Promise.all(writePromises);
   }
 
   /**
-   * Delete data from store using tombstone.
+   * Delete data from all stores using tombstone.
    * Can be overridden by later edits (LWW between delete and edit).
    *
    * @param key - The key to delete
    */
   async delete(key: string): Promise<boolean> {
     const timestamp = Date.now();
-    const existing = await this.store.get(key);
+
+    // Read from all stores and merge
+    let existing: CRDTDocument<T> | undefined;
+    for (const store of this.stores) {
+      const doc = await store.get(key);
+      if (doc) {
+        existing = existing ? this.mergeDocuments(existing, doc) : doc;
+      }
+    }
 
     if (!existing) {
       return false;
@@ -205,7 +234,7 @@ export class KeyvCRDT<T extends object> {
 
     // Create tombstone
     const tombstone: CRDTDocument<T> = {
-      ...(existing as unknown as CRDTDocument<T>),
+      ...existing,
       [TOMBSTONE_KEY]: {
         v: true,
         t: timestamp,
@@ -213,18 +242,21 @@ export class KeyvCRDT<T extends object> {
       },
     };
 
-    await this.store.set(key, tombstone as unknown as CRDTDocument<T>);
+    // Write to all stores
+    const writePromises = this.stores.map(store => store.set(key, tombstone));
+    await Promise.all(writePromises);
     return true;
   }
 
   /**
-   * Hard delete - permanently removes from store (no tombstone).
+   * Hard delete - permanently removes from all stores (no tombstone).
    * Use with caution: other devices may recreate the data.
    *
    * @param key - The key to permanently delete
    */
   async hardDelete(key: string): Promise<boolean> {
-    return this.store.delete(key);
+    const results = await Promise.all(this.stores.map(store => store.delete(key)));
+    return results.some(r => r);
   }
 
   /**
@@ -233,11 +265,14 @@ export class KeyvCRDT<T extends object> {
    * @param key - The key to check
    */
   async has(key: string): Promise<boolean> {
-    const doc = await this.store.get(key);
-    if (!doc) return false;
-
-    const crdtDoc = doc as unknown as CRDTDocument<T>;
-    return crdtDoc[TOMBSTONE_KEY]?.v !== true;
+    for (const store of this.stores) {
+      const doc = await store.get(key);
+      if (doc) {
+        const crdtDoc = doc as unknown as CRDTDocument<T>;
+        return crdtDoc[TOMBSTONE_KEY]?.v !== true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -246,22 +281,41 @@ export class KeyvCRDT<T extends object> {
    * @param key - The key to check
    */
   async isDeleted(key: string): Promise<boolean> {
-    const doc = await this.store.get(key);
-    if (!doc) return false;
-
-    const crdtDoc = doc as unknown as CRDTDocument<T>;
-    return crdtDoc[TOMBSTONE_KEY]?.v === true;
+    for (const store of this.stores) {
+      const doc = await store.get(key);
+      if (doc) {
+        const crdtDoc = doc as unknown as CRDTDocument<T>;
+        return crdtDoc[TOMBSTONE_KEY]?.v === true;
+      }
+    }
+    return false;
   }
 
   /**
-   * Get raw CRDT document (with metadata).
+   * Get raw CRDT document (with metadata) from all stores merged.
    * Useful for debugging or advanced use cases.
    *
    * @param key - The key to fetch
    */
   async getRaw(key: string): Promise<CRDTDocument<T> | undefined> {
-    const doc = await this.store.get(key);
-    return doc as unknown as CRDTDocument<T> | undefined;
+    let merged: CRDTDocument<T> | undefined;
+    for (const store of this.stores) {
+      const doc = await store.get(key);
+      if (doc) {
+        merged = merged ? this.mergeDocuments(merged, doc) : doc;
+      }
+    }
+    return merged;
+  }
+
+  /**
+   * Clear all stores.
+   */
+  async clear(): Promise<void> {
+    const clearPromises = this.stores
+      .filter(store => store.clear)
+      .map(store => store.clear!());
+    await Promise.all(clearPromises);
   }
 
   // ==========================================================================
@@ -272,10 +326,9 @@ export class KeyvCRDT<T extends object> {
   private toPlainObject(doc: CRDTDocument<T>): Partial<T> {
     const result: Partial<T> = {};
     for (const key in doc) {
-      if (key === TOMBSTONE_KEY) continue; // Skip tombstone field
+      if (key === TOMBSTONE_KEY) continue;
       const field = (doc as Record<string, CRDTField<unknown>>)[key];
       if (field) {
-        // For counter fields, sum all device values
         if (field.c) {
           (result as Record<string, unknown>)[key] = Object.values(field.c).reduce((a, b) => a + b, 0);
         } else {
@@ -369,7 +422,7 @@ export class KeyvCRDT<T extends object> {
 }
 
 // ============================================================================
-// Factory function
+// Factory function (like KeyvNest)
 // ============================================================================
 
 /**
@@ -377,17 +430,23 @@ export class KeyvCRDT<T extends object> {
  *
  * @example
  * ```ts
- * const crdt = createCRDT(store, 'device-id', { score: 'max', coins: 'counter' });
- * await crdt.set('user:1', { score: 100, coins: 50 });
- * const data = await crdt.get('user:1');
+ * // Single store
+ * const crdt = KeyvCRDT('device', { score: 'max' }, mongoStore);
+ *
+ * // Multi-store: cache + remote
+ * const crdt = KeyvCRDT('device', { score: 'max' }, new Map(), mongoStore);
+ *
+ * // With nested stores
+ * const crdt = KeyvCRDT('device', {}, localCache, diskCache, remoteStore);
  * ```
  */
 export function createCRDT<T extends object>(
-  store: KeyvCRDTStore<CRDTDocument<T>>,
   deviceId: string,
-  mergeConfig: MergeConfig<T> = {}
+  mergeConfig: MergeConfig<T>,
+  ...stores: KeyvCRDTStore<CRDTDocument<T>>[]
 ): KeyvCRDT<T> {
-  return new KeyvCRDT(store, deviceId, mergeConfig);
+  return new KeyvCRDT(deviceId, mergeConfig, ...stores);
 }
 
-export default KeyvCRDT;
+// Default export as function (like KeyvNest)
+export default createCRDT;
