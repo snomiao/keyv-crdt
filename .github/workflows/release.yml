@@ -1,10 +1,16 @@
 on:
   push:
-permissions:
-  contents: write
-  issues: write
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
 jobs:
-  test:
+  test_build_and_release:
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -16,4 +22,6 @@ jobs:
       - run: bun i
       - run: bun run test
       - run: bun run build
+      # publish if main
       - run: bunx semantic-release
+        if: github.ref == 'refs/heads/main'
