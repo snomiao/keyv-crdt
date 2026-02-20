@@ -1,0 +1,17 @@
+on:
+  push:
+permissions:
+  contents: write
+  issues: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: latest
+      - uses: oven-sh/setup-bun@v2
+      - run: bun i
+      - run: bun run test
+      - run: bun run build

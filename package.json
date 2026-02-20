@@ -1,0 +1,69 @@
+{
+  "name": "keyv-crdt",
+  "version": "0.0.1",
+  "description": "CRDT wrapper for Keyv stores - conflict-free synchronization with customizable merge strategies",
+  "keywords": [
+    "keyv",
+    "crdt",
+    "conflict-free",
+    "sync",
+    "offline-first",
+    "distributed",
+    "replication",
+    "lww",
+    "last-write-wins",
+    "merge",
+    "cache",
+    "storage",
+    "key-value"
+  ],
+  "homepage": "https://github.com/snomiao/keyv-crdt#readme",
+  "bugs": {
+    "url": "https://github.com/snomiao/keyv-crdt/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snomiao/keyv-crdt.git"
+  },
+  "license": "MIT",
+  "author": "snomiao <snomiao@gmail.com>",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "src/index.ts",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build:type && bun build:js",
+    "build:js": "bun build src/index.ts --outdir=dist",
+    "build:type": "bunx --bun tsc -d --noEmit false --emitDeclarationOnly --outDir dist",
+    "prerelease": "bun run build && bun run test",
+    "release": "bunx standard-version && git push --follow-tags && npm publish",
+    "test": "bun test",
+    "prepare": "husky",
+    "fmt": "oxlint --fix && oxfmt"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "husky": "^9.1.7",
+    "oxfmt": "^0.17.0",
+    "oxlint": "^1.32.0",
+    "typescript": "^5.5.4"
+  },
+  "peerDependencies": {
+    "keyv": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "keyv": {
+      "optional": true
+    }
+  },
+  "type": "module"
+}
