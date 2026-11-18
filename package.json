@@ -43,7 +43,7 @@
   "scripts": {
     "build": "bun build:type && bun build:js",
     "build:js": "bun build src/index.ts --outdir=dist",
-    "build:type": "bunx --bun tsc -d --noEmit false --emitDeclarationOnly --outDir dist",
+    "build:type": "tsrs -d --noEmit false --emitDeclarationOnly --outDir dist",
     "prerelease": "bun run build && bun run test",
     "release": "bunx standard-version && git push --follow-tags && npm publish",
     "test": "bun test",
@@ -55,7 +55,7 @@
     "husky": "^9.1.7",
     "oxfmt": "^0.17.0",
     "oxlint": "^1.32.0",
-    "typescript": "^5.5.4"
+    "tsrs": "0.25.0-ts7.1.0-beta"
   },
   "peerDependencies": {
     "keyv": ">=4.0.0"

@@ -1,6 +1,8 @@
 {
   "exclude": ["tmp", "node_modules", "dist", "**/*.spec.ts", "**/__tests__"],
   "compilerOptions": {
+    "rootDir": "src",
+    "types": ["bun", "node"],
     "lib": ["ESNext", "DOM"],
     "target": "ESNext",
     "module": "ESNext",
